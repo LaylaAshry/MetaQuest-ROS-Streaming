@@ -108,4 +108,167 @@ This project was developed with the support of the following tools and documenta
 
 ---
 
+# Tcp_dserver_node ROS
 
+````
+import rclpy  
+from rclpy.node import Node  
+import socket  
+import struct  
+import json  
+from sensor_msgs.msg import CompressedImage, CameraInfo  
+from geometry_msgs.msg import TransformStamped   
+from builtin_interfaces.msg import Time   
+import tf2_ros   
+import traceback   
+import threading    
+
+
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy   
+
+
+class QuestStreamReceiver(Node):     
+    def __init__(self):   
+        super().__init__('quest_stream_receiver')   
+        self.declare_parameter('listen_ip', '0.0.0.0')   
+        self.declare_parameter('listen_port', 8888)   
+        self.ip = self.get_parameter('listen_ip').get_parameter_value().string_value     
+        self.port = self.get_parameter('listen_port').get_parameter_value().integer_value   
+
+
+        video_qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE
+        )
+       
+        self.image_pub = self.create_publisher(
+            CompressedImage,
+            '/left/image_raw/compressed/from_tcp',
+            video_qos_profile)
+           
+        self.cam_info_pub = self.create_publisher(
+            CameraInfo,
+            '/left/camera_info',
+            video_qos_profile)
+        # --- END OF QOS FIX ---
+
+
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        self.get_logger().info(f"TCP Server Node initialized. Listening on {self.ip}:{self.port}")
+
+
+    def run_server(self):
+        # ... (The rest of the file is identical and correct)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((self.ip, self.port))
+            s.listen()
+            while rclpy.ok():
+                self.get_logger().info("Waiting for a connection from the Quest headset...")
+                try:
+                    conn, addr = s.accept()
+                    with conn:
+                        self.get_logger().info(f"Connection established with {addr}")
+                        self.handle_connection(conn)
+                except Exception as e:
+                    self.get_logger().error(f"Server loop error: {e}\n{traceback.format_exc()}")
+                self.get_logger().warn("Client disconnected. Waiting for new connection.")
+
+
+    def handle_connection(self, conn):
+        while rclpy.ok():
+            try:
+                header_data = self._read_exact(conn, 20)
+                if not header_data: break
+                timestamp_ms, intrinsics_size, extrinsics_size, frame_size = struct.unpack('>QIII', header_data)
+                intrinsics_bytes = self._read_exact(conn, intrinsics_size)
+                extrinsics_bytes = self._read_exact(conn, extrinsics_size)
+                frame_bytes = self._read_exact(conn, frame_size)
+                if not (intrinsics_bytes and extrinsics_bytes and frame_bytes): break
+                ros_time = Time(sec=int(timestamp_ms // 1000), nanosec=int((timestamp_ms % 1000) * 1_000_000))
+                intrinsics_data = json.loads(intrinsics_bytes)
+                extrinsics_data = json.loads(extrinsics_bytes)
+                self.publish_image(ros_time, frame_bytes)
+                self.publish_camera_info(ros_time, intrinsics_data)
+                self.publish_transform(ros_time, extrinsics_data)
+            except (ConnectionResetError, BrokenPipeError) as e:
+                self.get_logger().warn(f"Connection lost: {e}")
+                break
+            except Exception as e:
+                self.get_logger().error(f"Error handling connection: {e}\n{traceback.format_exc()}")
+                break
+
+
+    def _read_exact(self, conn, length):
+        data = bytearray()
+        while len(data) < length:
+            packet = conn.recv(length - len(data))
+            if not packet: return None
+            data.extend(packet)
+        return bytes(data)
+
+
+    def publish_image(self, timestamp, frame_data):
+        msg = CompressedImage()
+        msg.header.stamp = timestamp
+        msg.header.frame_id = 'quest_left_camera'
+        msg.format = "h24"
+        msg.data = list(frame_data)
+        self.image_pub.publish(msg)
+
+
+    def publish_camera_info(self, timestamp, intrinsics):
+        msg = CameraInfo()
+        msg.header.stamp = timestamp
+        msg.header.frame_id = 'quest_left_camera'
+        msg.width, msg.height = 1280, 720
+        msg.k = [
+            float(intrinsics.get('focalLengthX', 0.0)), 0.0, float(intrinsics.get('principalPointX', 0.0)),
+            0.0, float(intrinsics.get('focalLengthY', 0.0)), float(intrinsics.get('principalPointY', 0.0)),
+            0.0, 0.0, 1.0
+        ]
+        distortion = intrinsics.get('distortionCoefficients', [])
+        if distortion:
+            msg.d = [float(c) for c in distortion]
+            msg.distortion_model = "plumb_bob"
+        else:
+            msg.distortion_model = ""
+        msg.r = [1.0] * 9
+        msg.p = [msg.k[0], 0.0, msg.k[2], 0.0, 0.0, msg.k[4], msg.k[5], 0.0, 0.0, 0.0, 1.0, 0.0]
+        self.cam_info_pub.publish(msg)
+
+
+    def publish_transform(self, timestamp, extrinsics):
+        t = TransformStamped()
+        t.header.stamp = timestamp
+        t.header.frame_id = 'world'
+        t.child_frame_id = 'quest_left_camera'
+        translation = extrinsics.get('translationVector', [0.0]*3)
+        rotation = extrinsics.get('rotationQuaternion', [0.0]*3 + [1.0])
+        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = float(translation[0]), float(translation[1]), float(translation[2])
+        t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = float(rotation[0]), float(rotation[1]), float(rotation[2]), float(rotation[3])
+        self.tf_broadcaster.sendTransform(t)
+
+
+def main(args=None):  
+    rclpy.init(args=args)   
+    node = QuestStreamReceiver()  
+    server_thread = threading.Thread(target=node.run_server)  
+    server_thread.daemon = True   
+    server_thread.start()   
+    try:   
+        rclpy.spin(node)   
+    except KeyboardInterrupt:   
+        pass   
+    finally:   
+        node.destroy_node()   
+        rclpy.shutdown()   
+
+
+if __name__ == '__main__':   
+    main()    
+
+
+````
