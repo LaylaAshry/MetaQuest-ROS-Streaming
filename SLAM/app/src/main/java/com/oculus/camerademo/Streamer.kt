@@ -3,7 +3,7 @@ package com.oculus.camerademo
 
 import android.media.MediaCodec
 import android.util.Log
-// --- CHANGE 1: ADD IMPORTS FOR JSON SERIALIZATION ---
+
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.DataOutputStream
