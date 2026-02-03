@@ -1,0 +1,779 @@
+
+This is the QuestCameraHelpers.kt
+==========================================
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.oculus.camerademo
+
+import android.hardware.camera2.CameraCharacteristics.Key
+
+/** These helpers demonstrate Quest-specific APIs required to access a Passthrough camera */
+const val KEY_CAMERA_POSITION = "com.meta.extra_metadata.position"
+const val KEY_CAMERA_SOURCE = "com.meta.extra_metadata.camera_source"
+
+/**
+ * Use this custom CameraCharacterics.Key to obtain camera position. Camera position can be Left or
+ * Right (see [com.oculus.camerademo.Position])
+ */
+val KEY_POSITION = Key(KEY_CAMERA_POSITION, Int::class.java)
+
+/**
+ * Use this custom CameraCharacterics.Key to obtain camera source. Source value for the Passthrough
+ * camera is 0
+ */
+val KEY_SOURCE = Key(KEY_CAMERA_SOURCE, Int::class.java)
+const val CAMERA_SOURCE_PASSTHROUGH = 0
+
+// Add to QuestCameraHelpers.kt
+const val KEY_INTRINSICS = "com.meta.extra_metadata.intrinsics"
+const val KEY_DISTORTION = "com.meta.extra_metadata.distortion"
+
+val INTRINSICS_KEY = Key(KEY_INTRINSICS, FloatArray::class.java)
+val DISTORTION_KEY = Key(KEY_DISTORTION, FloatArray::class.java)
+
+This is the ImageProcessHelpers.kt
+==========================================
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.oculus.camerademo
+
+import java.nio.ByteBuffer
+
+fun getBrigthness(yPlane: ByteBuffer, width: Int, height: Int): Int {
+  var sumY = 0
+
+  // Iterate over each pixel in the Y data
+  for (i in 0 until height) {
+    for (j in 0 until width) {
+      // Calculate the index of the current pixel in the Y data
+      var idx = (i * width) + j
+      sumY += yPlane[idx]
+    }
+  }
+
+  return sumY / (width * height)
+}
+
+
+
+This is the DataModel.kt
+==========================================
+package com.oculus.camerademo
+
+data class CameraUiState(
+    val cameraBrightness: Float = 0f,
+    val showParameters: Boolean = false,
+    val intrinsicsText: String = "",
+    val extrinsicsText: String = "",
+    val availableCameras: List<CameraConfig> = emptyList()
+)
+
+data class CameraConfig(
+    val id: String,
+    val width: Int,
+    val height: Int,
+    val position: String,
+    val isPassthrough: Boolean,
+    val intrinsics: CameraIntrinsics?,
+    val extrinsics: CameraExtrinsics?
+)
+
+data class CameraIntrinsics(
+    val focalLengthX: Float,
+    val focalLengthY: Float,
+    val principalPointX: Float,
+    val principalPointY: Float,
+    val distortionCoefficients: FloatArray?
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as CameraIntrinsics
+
+        if (focalLengthX != other.focalLengthX) return false
+        if (focalLengthY != other.focalLengthY) return false
+        if (principalPointX != other.principalPointX) return false
+        if (principalPointY != other.principalPointY) return false
+        if (distortionCoefficients != null) {
+            if (other.distortionCoefficients == null) return false
+            if (!distortionCoefficients.contentEquals(other.distortionCoefficients)) return false
+        } else if (other.distortionCoefficients != null) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = focalLengthX.hashCode()
+        result = 31 * result + focalLengthY.hashCode()
+        result = 31 * result + principalPointX.hashCode()
+        result = 31 * result + principalPointY.hashCode()
+        result = 31 * result + (distortionCoefficients?.contentHashCode() ?: 0)
+        return result
+    }
+}
+
+data class CameraExtrinsics(
+    val rotationQuaternion: FloatArray,
+    val translationVector: FloatArray
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as CameraExtrinsics
+
+        if (!rotationQuaternion.contentEquals(other.rotationQuaternion)) return false
+        if (!translationVector.contentEquals(other.translationVector)) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = rotationQuaternion.contentHashCode()
+        result = 31 * result + translationVector.contentHashCode()
+        return result
+    }
+}
+
+sealed class CameraEvent {
+    data class NotificationEvent(val message: String) : CameraEvent()
+}
+
+This is the cameraDemoViewModel.kt
+==========================================
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.oculus.camerademo
+
+import android.Manifest
+import android.app.Application
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.ImageFormat
+import android.hardware.camera2.*
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
+import android.media.Image
+import android.media.ImageReader
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
+import android.util.Log
+import android.view.Surface
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import java.util.concurrent.Executors
+
+class CameraDemoViewModel(application: Application) : AndroidViewModel(application) {
+    companion object {
+        const val IMAGE_BUFFER_SIZE = 3
+        private const val TAG = "CameraDemoVM"
+
+        // Camera position constants
+        private const val META_POSITION_LEFT = 0
+        private const val META_POSITION_RIGHT = 1
+    }
+
+    private val context = application.applicationContext
+    private val cameraManager by lazy {
+        context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    }
+
+    private val _uiState = MutableLiveData(CameraUiState())
+    val uiState: LiveData<CameraUiState> = _uiState
+
+    private val _eventLiveData = MutableLiveData<CameraEvent>()
+    val cameraEvents: LiveData<CameraEvent> = _eventLiveData
+
+    private lateinit var imageReader: ImageReader
+    private val imageReaderThread = HandlerThread("ImageReader").apply { start() }
+    private val imageReaderHandler = Handler(imageReaderThread.looper)
+
+    private var camera: CameraDevice? = null
+    private var cameraSession: CameraCaptureSession? = null
+    private val cameraThread = HandlerThread("CameraThread").apply { start() }
+    private val cameraHandler = Handler(cameraThread.looper)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val executor = Executors.newSingleThreadExecutor()
+
+    private var activeConfig: CameraConfig? = null
+    var cameraWasActive = false
+
+    fun init() {
+        try {
+            val cameraIds = cameraManager.cameraIdList
+            if (cameraIds.isEmpty()) {
+                postEvent("No cameras found")
+                Log.e(TAG, "No camera IDs found")
+                return
+            }
+
+            cameraIds.forEach { id ->
+                try {
+                    val chars = cameraManager.getCameraCharacteristics(id)
+                    val config = createCameraConfig(id, chars) ?: return@forEach
+
+                    _uiState.postValue(_uiState.value?.copy(
+                        availableCameras = _uiState.value?.availableCameras?.plus(config) ?: listOf(config)
+                    ))
+
+                    Log.d(TAG, "Added camera config: ${config.id} (Position: ${config.position})")
+                } catch (e: CameraAccessException) {
+                    Log.e(TAG, "Error accessing camera $id", e)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Camera initialization failed", e)
+            postEvent("Camera init failed")
+        }
+    }
+
+    private fun createCameraConfig(id: String, chars: CameraCharacteristics): CameraConfig? {
+        return try {
+            val pixelSize = chars.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: run {
+                Log.w(TAG, "No pixel size for $id")
+                return null
+            }
+
+            // Get camera position with fallback to Unknown
+            val positionInt = chars.get<Int>(KEY_POSITION) ?: -1
+            val position = when (positionInt) {
+                META_POSITION_LEFT -> "Left"
+                META_POSITION_RIGHT -> "Right"
+                else -> "Unknown"
+            }
+
+            CameraConfig(
+                id = id,
+                width = pixelSize.width,
+                height = pixelSize.height,
+                position = position,
+                isPassthrough = chars.get(KEY_SOURCE) == CAMERA_SOURCE_PASSTHROUGH,
+                intrinsics = chars.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.let {
+                    CameraIntrinsics(
+                        it[0], it[1], it[2], it[3],
+                        chars.get(CameraCharacteristics.LENS_DISTORTION)
+                    )
+                },
+                extrinsics = chars.get(CameraCharacteristics.LENS_POSE_ROTATION)?.let {
+                    CameraExtrinsics(it,
+                        chars.get(CameraCharacteristics.LENS_POSE_TRANSLATION) ?: floatArrayOf()
+                    )
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating config for $id", e)
+            null
+        }
+    }
+
+    fun onResume(surface: Surface) {
+        if (cameraWasActive) {
+            startCamera(surface)
+        }
+    }
+
+    fun onPause() {
+        cameraWasActive = camera != null
+        cleanup()
+    }
+
+    fun startCamera(surface: Surface) {
+        if (!hasPermissions()) {
+            postEvent("Camera permissions not granted")
+            return
+        }
+
+        if (_uiState.value?.availableCameras.isNullOrEmpty()) {
+            postEvent("No camera configurations available")
+            return
+        }
+
+        // Try to find right camera first, then fall back to any available camera
+        val config = _uiState.value?.availableCameras?.find { it.position == "Right" }
+            ?: _uiState.value?.availableCameras?.firstOrNull()
+            ?: run {
+                postEvent("No valid camera found")
+                return
+            }
+
+        try {
+            imageReader = ImageReader.newInstance(
+                config.width,
+                config.height,
+                ImageFormat.YUV_420_888,
+                IMAGE_BUFFER_SIZE
+            )
+
+            // Set up image available listener
+            imageReader.setOnImageAvailableListener({ reader ->
+                try {
+                    reader?.acquireLatestImage()?.use { image ->
+                        processImage(image)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing image", e)
+                }
+            }, imageReaderHandler)
+
+            cameraManager.openCamera(config.id, object : CameraDevice.StateCallback() {
+                override fun onOpened(device: CameraDevice) {
+                    camera = device
+                    activeConfig = config
+                    createSession(device, surface)
+                    postEvent("Camera ${config.id} opened")
+                }
+
+                override fun onDisconnected(device: CameraDevice) {
+                    Log.w(TAG, "Camera ${device.id} disconnected")
+                    cleanup()
+                    postEvent("Camera disconnected")
+                }
+
+                override fun onError(device: CameraDevice, error: Int) {
+                    Log.e(TAG, "Camera ${device.id} error: ${error.toErrorString()}")
+                    cleanup()
+                    postEvent("Camera error: ${error.toErrorString()}")
+                }
+            }, cameraHandler)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Camera permission denied", e)
+            postEvent("Camera permission required")
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "Camera access error", e)
+            postEvent("Camera unavailable")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open camera", e)
+            postEvent("Failed to open camera")
+        }
+    }
+
+    private fun createSession(device: CameraDevice, surface: Surface) {
+        val outputs = listOf(
+            OutputConfiguration(imageReader.surface),
+            OutputConfiguration(surface)
+        )
+
+        device.createCaptureSession(
+            SessionConfiguration(
+                SessionConfiguration.SESSION_REGULAR,
+                outputs,
+                executor,
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        cameraSession = session
+                        try {
+                            val request = device.createCaptureRequest(
+                                CameraDevice.TEMPLATE_PREVIEW
+                            ).apply {
+                                addTarget(imageReader.surface)
+                                addTarget(surface)
+                            }
+                            session.setRepeatingRequest(request.build(), null, cameraHandler)
+                            postEvent("Camera preview started")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Preview setup failed", e)
+                            postEvent("Preview failed")
+                            cleanup()
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        Log.e(TAG, "Session configuration failed")
+                        postEvent("Session config failed")
+                        cleanup()
+                    }
+                }
+            )
+        )
+    }
+
+    private fun processImage(image: Image) {
+        try {
+            activeConfig?.let { config ->
+                val brightness = getBrigthness(image.planes[0].buffer, config.width, config.height)
+                _uiState.postValue(_uiState.value?.copy(
+                    cameraBrightness = brightness.toFloat(),
+                    intrinsicsText = _uiState.value?.intrinsicsText ?: "",
+                    extrinsicsText = _uiState.value?.extrinsicsText ?: ""
+                ))
+            }
+        } finally {
+            image.close()
+        }
+    }
+
+    fun stopCamera() = cleanup()
+
+    private fun cleanup() {
+        cameraSession?.close()
+        camera?.close()
+        imageReader.close()
+        cameraSession = null
+        camera = null
+        activeConfig = null
+    }
+
+    fun shutdown() {
+        cleanup()
+        imageReaderThread.quitSafely()
+        cameraThread.quitSafely()
+    }
+
+    fun toggleParametersDisplay() {
+        _uiState.value = _uiState.value?.copy(
+            showParameters = !(_uiState.value?.showParameters ?: false),
+            intrinsicsText = activeConfig?.intrinsics?.let {
+                "Focal: (${"%.2f".format(it.focalLengthX)}, ${"%.2f".format(it.focalLengthY)})\n" +
+                        "Principal: (${"%.2f".format(it.principalPointX)}, ${"%.2f".format(it.principalPointY)})\n" +
+                        "Distortion: ${it.distortionCoefficients?.joinToString() ?: "None"}"
+            } ?: "Intrinsics not available",
+            extrinsicsText = activeConfig?.extrinsics?.let {
+                "Rotation: ${it.rotationQuaternion.joinToString(", ") { "%.4f".format(it) }}\n" +
+                        "Translation: ${it.translationVector.joinToString(", ") { "%.4f".format(it) }}"
+            } ?: "Extrinsics not available"
+        )
+    }
+
+    private fun Int.toErrorString() = when(this) {
+        CameraDevice.StateCallback.ERROR_CAMERA_DEVICE -> "Fatal device error"
+        CameraDevice.StateCallback.ERROR_CAMERA_DISABLED -> "Camera disabled"
+        CameraDevice.StateCallback.ERROR_CAMERA_IN_USE -> "Camera in use"
+        CameraDevice.StateCallback.ERROR_CAMERA_SERVICE -> "Fatal service error"
+        CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE -> "Max cameras in use"
+        else -> "Unknown error ($this)"
+    }
+
+    private fun hasPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(context, PermissionManager.HZOS_CAMERA_PERMISSION) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun postEvent(message: String) {
+        mainHandler.post { _eventLiveData.value = CameraEvent.NotificationEvent(message) }
+    }
+}
+
+This is the MainActivity.kt
+==========================================
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.oculus.camerademo
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.os.Bundle
+import android.view.Surface
+import android.view.TextureView
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModelProvider
+import com.oculus.camerademo.ui.theme.CameraDemoTheme
+
+class MainActivity : ComponentActivity() {
+    private val viewModel by lazy {
+        ViewModelProvider.AndroidViewModelFactory(application)
+            .create(CameraDemoViewModel::class.java)
+    }
+
+    private val permissions = arrayOf(
+        Manifest.permission.CAMERA,
+        PermissionManager.HZOS_CAMERA_PERMISSION
+    )
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions.all { it.value }) {
+            startCameraIfReady()
+        } else {
+            Toast.makeText(
+                this,
+                "Camera permissions required",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private var previewSurface: Surface? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        viewModel.init()
+
+        viewModel.uiState.observe(this) { uiState ->
+            setContent {
+                CameraApp(
+                    uiState = uiState,
+                    onStartCamera = { checkPermissions() },
+                    onStopCamera = { viewModel.stopCamera() },
+                    onExit = { finish() },
+                    onToggleParams = { viewModel.toggleParametersDisplay() },
+                    onSurfaceAvailable = { surface, width, height ->
+                        updatePreviewTexture(surface, width, height)
+                    }
+                )
+            }
+        }
+
+        viewModel.cameraEvents.observe(this) { event ->
+            if (event is CameraEvent.NotificationEvent) {
+                Toast.makeText(this, event.message, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun checkPermissions() {
+        when {
+            hasAllPermissions() -> startCameraIfReady()
+            else -> requestPermissionLauncher.launch(permissions)
+        }
+    }
+
+    private fun hasAllPermissions(): Boolean {
+        return permissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun startCameraIfReady() {
+        if (!hasAllPermissions()) {
+            Toast.makeText(this, "Permissions not granted", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        previewSurface?.let { surface ->
+            viewModel.startCamera(surface)
+        } ?: Toast.makeText(this, "Preview surface not ready", Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        previewSurface?.let { surface ->
+            viewModel.onResume(surface)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        viewModel.onPause()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        viewModel.shutdown()
+    }
+
+    private fun updatePreviewTexture(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        previewSurface?.release()
+        previewSurface = Surface(surfaceTexture).apply {
+            viewModel.onResume(this)
+        }
+    }
+}
+
+@Composable
+fun CameraApp(
+    uiState: CameraUiState,
+    onStartCamera: () -> Unit,
+    onStopCamera: () -> Unit,
+    onExit: () -> Unit,
+    onToggleParams: () -> Unit,
+    onSurfaceAvailable: (SurfaceTexture, Int, Int) -> Unit
+) {
+    CameraDemoTheme {
+        Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                CameraControls(
+                    uiState = uiState,
+                    onStart = onStartCamera,
+                    onStop = onStopCamera,
+                    onToggleParams = onToggleParams
+                )
+
+                CameraPreview(onSurfaceAvailable = onSurfaceAvailable)
+
+                Button(
+                    onClick = onExit,
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(16.dp)
+                ) {
+                    Text("Exit")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CameraControls(
+    uiState: CameraUiState,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onToggleParams: () -> Unit
+) {
+    Column(modifier = Modifier.padding(16.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Button(onClick = onStart) {
+                Text("Start")
+            }
+            Button(onClick = onStop) {
+                Text("Stop")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Row(
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column {
+                Text("Brightness:", fontWeight = FontWeight.Bold)
+                Text(uiState.cameraBrightness.toString())
+            }
+            Button(onClick = onToggleParams) {
+                Text(if (uiState.showParameters) "Hide Params" else "Show Params")
+            }
+        }
+
+        if (uiState.showParameters) {
+            Column(
+                modifier = Modifier
+                    .padding(8.dp)
+                    .background(Color.LightGray.copy(alpha = 0.2f))
+            ) {
+                Text("Intrinsics:", fontWeight = FontWeight.Bold)
+                Text(uiState.intrinsicsText)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Extrinsics:", fontWeight = FontWeight.Bold)
+                Text(uiState.extrinsicsText)
+            }
+        }
+    }
+}
+
+@Composable
+fun CameraPreview(
+    onSurfaceAvailable: (SurfaceTexture, Int, Int) -> Unit
+) {
+    AndroidView(
+        factory = { context ->
+            TextureView(context).apply {
+                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                    override fun onSurfaceTextureAvailable(
+                        surface: SurfaceTexture,
+                        width: Int,
+                        height: Int
+                    ) {
+                        onSurfaceAvailable(surface, width, height)
+                    }
+
+                    override fun onSurfaceTextureSizeChanged(
+                        surface: SurfaceTexture,
+                        width: Int,
+                        height: Int
+                    ) {
+                        onSurfaceAvailable(surface, width, height)
+                    }
+
+                    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                        return true
+                    }
+
+                    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+                }
+            }
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(4f / 3f)
+    )
+}
